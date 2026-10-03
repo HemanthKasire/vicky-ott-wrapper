@@ -1,0 +1,141 @@
+"use client";
+
+import {
+  AlertTriangle, CheckCircle2, CircleGauge, HardDrive, Link2,
+  LoaderCircle, Plus, RefreshCw, Server, ShieldCheck, XCircle,
+} from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { OttHeader } from "@/components/ott-header";
+
+type Storage = {
+  id: string; label: string; totalBytes: number; usedBytes: number;
+  availableBytes: number; mounted: boolean; healthy?: boolean;
+};
+type StatusPayload = {
+  connected: boolean; storage: Storage[];
+  queue?: { downloading: number; seeding: number; paused: number };
+};
+type AddPayload = {
+  queued: boolean; storageFull?: boolean; storageUsagePercent?: number; message?: string;
+};
+type ApiError = { error?: string; detail?: string };
+
+function formatBytes(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes < 0) return "—";
+  if (bytes === 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), 4);
+  const value = bytes / 1024 ** index;
+  return `${value.toFixed(value >= 100 || index === 0 ? 0 : value >= 10 ? 1 : 2)} ${units[index]}`;
+}
+
+function usagePercent(storage: Storage) {
+  return storage.totalBytes ? Math.min(100, Math.max(0, storage.usedBytes / storage.totalBytes * 100)) : 100;
+}
+
+async function readJson<T>(response: Response): Promise<T> {
+  const data = (await response.json().catch(() => ({}))) as T & ApiError;
+  if (!response.ok) throw new Error(data.detail || data.error || "Request failed");
+  return data;
+}
+
+function StorageCard({ storage }: { storage: Storage }) {
+  const used = usagePercent(storage);
+  const full = used >= 95;
+  return (
+    <div className={`rounded-2xl border p-4 ${full ? "border-rose-400/25 bg-rose-400/[0.055]" : "border-white/[0.08] bg-white/[0.025]"}`}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-3">
+          <span className={`grid size-9 shrink-0 place-items-center rounded-xl ${full ? "bg-rose-400/10 text-rose-300" : "bg-white/[0.05] text-slate-400"}`}><HardDrive className="size-4" /></span>
+          <div className="min-w-0"><p className="truncate text-sm font-semibold text-slate-100">{storage.label}</p><p className="mt-0.5 text-xs text-slate-500">{storage.mounted ? `${formatBytes(storage.availableBytes)} free` : "Not mounted"}</p></div>
+        </div>
+        <span className={`mt-1 size-2 rounded-full ${storage.mounted && !full ? "bg-emerald-400" : "bg-rose-400"}`} />
+      </div>
+      <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-white/[0.06]"><div className={`h-full rounded-full ${full ? "bg-rose-400" : "bg-amber-400"}`} style={{ width: `${used}%` }} /></div>
+      <div className="mt-2 flex justify-between text-[11px] text-slate-500"><span>{used.toFixed(0)}% used</span><span>{formatBytes(storage.usedBytes)} / {formatBytes(storage.totalBytes)}</span></div>
+      {full && <p className="mt-3 flex items-start gap-2 text-xs text-rose-200"><AlertTriangle className="mt-0.5 size-3.5 shrink-0" />Requests pause automatically at 95% usage.</p>}
+    </div>
+  );
+}
+
+export default function Home() {
+  const [magnet, setMagnet] = useState("");
+  const [status, setStatus] = useState<StatusPayload | null>(null);
+  const [statusError, setStatusError] = useState("");
+  const [busy, setBusy] = useState<"status" | "add" | "">("");
+  const [notice, setNotice] = useState<{ kind: "success" | "error"; text: string } | null>(null);
+
+  const loadStatus = useCallback(async () => {
+    setBusy((current) => current || "status");
+    try {
+      const response = await fetch("/api/torrent/status", { cache: "no-store" });
+      setStatus(await readJson<StatusPayload>(response));
+      setStatusError("");
+    } catch (error) {
+      setStatusError(error instanceof Error ? error.message : "Could not reach the OCI bridge");
+    } finally {
+      setBusy((current) => current === "status" ? "" : current);
+    }
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => void loadStatus(), 0);
+    return () => window.clearTimeout(timer);
+  }, [loadStatus]);
+
+  async function addTorrent() {
+    const trimmed = magnet.trim();
+    setNotice(null);
+    if (!trimmed.toLowerCase().startsWith("magnet:?")) {
+      setNotice({ kind: "error", text: "Paste a magnet link beginning with magnet:?" });
+      return;
+    }
+    setBusy("add");
+    try {
+      const response = await fetch("/api/torrent/add", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ magnet: trimmed }),
+      });
+      const data = await readJson<AddPayload>(response);
+      if (data.storageFull || !data.queued) {
+        setNotice({ kind: "error", text: data.message || "Storage is 95% full. Please try again later." });
+      } else {
+        setNotice({ kind: "success", text: data.message || "Torrent request was added to the download queue." });
+        setMagnet("");
+      }
+      void loadStatus();
+    } catch (error) {
+      setNotice({ kind: "error", text: error instanceof Error ? error.message : "Could not add torrent" });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  const storage = status?.storage || [];
+
+  return (
+    <main className="min-h-screen bg-[#070b12] text-slate-100 selection:bg-amber-300 selection:text-slate-950">
+      <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(circle_at_18%_-5%,rgba(245,158,11,0.11),transparent_32%),radial-gradient(circle_at_90%_10%,rgba(56,189,248,0.07),transparent_25%)]" />
+      <OttHeader connected={status?.connected} />
+
+      <div className="relative mx-auto grid max-w-7xl gap-6 px-4 py-8 sm:px-6 lg:grid-cols-[minmax(0,1fr)_360px] lg:px-8 lg:py-12">
+        <section>
+          <div className="mb-8 max-w-3xl"><h1 className="text-3xl font-bold tracking-[-0.035em] text-white sm:text-5xl">Add a movie request.</h1><p className="mt-4 max-w-2xl text-sm leading-6 text-slate-400 sm:text-base">Paste a magnet link. The server checks storage immediately and adds it to qBittorrent when the media volume is below 95% usage.</p></div>
+          <div className="rounded-3xl border border-white/[0.09] bg-[#0d131e]/90 p-5 shadow-[0_30px_80px_rgb(0_0_0/35%)] sm:p-7">
+            <label htmlFor="magnet" className="mb-3 flex items-center justify-between gap-3"><span className="flex items-center gap-2 text-sm font-semibold"><Link2 className="size-4 text-amber-300" /> Magnet link</span><span className="text-[11px] text-slate-500">Movies only · legal content</span></label>
+            <textarea id="magnet" value={magnet} onChange={(event) => { setMagnet(event.target.value); setNotice(null); }} placeholder="magnet:?xt=urn:btih:…" rows={4} spellCheck={false} className="w-full resize-none rounded-2xl border border-white/[0.09] bg-[#080d15] px-4 py-4 font-mono text-sm leading-6 text-slate-200 outline-none transition placeholder:text-slate-700 focus:border-amber-400/50 focus:ring-4 focus:ring-amber-400/[0.06]" />
+            <div className="mt-4 flex flex-col-reverse items-stretch justify-between gap-3 sm:flex-row sm:items-center"><p className="flex items-center gap-2 text-xs text-slate-500"><ShieldCheck className="size-4 text-emerald-400" />Storage is rechecked before every request.</p><button type="button" onClick={addTorrent} disabled={!magnet.trim() || Boolean(busy)} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-amber-400 px-5 text-sm font-bold text-slate-950 transition hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-40">{busy === "add" ? <LoaderCircle className="size-4 animate-spin" /> : <Plus className="size-4" />}{busy === "add" ? "Checking storage…" : "Add torrent"}</button></div>
+          </div>
+          {notice && <div className={`mt-5 flex items-start gap-3 rounded-2xl border p-4 text-sm ${notice.kind === "success" ? "border-emerald-400/20 bg-emerald-400/[0.07] text-emerald-200" : "border-rose-400/20 bg-rose-400/[0.07] text-rose-200"}`}>{notice.kind === "success" ? <CheckCircle2 className="mt-0.5 size-4 shrink-0" /> : <XCircle className="mt-0.5 size-4 shrink-0" />}<p>{notice.text}</p></div>}
+        </section>
+
+        <aside className="space-y-5 lg:pt-[6.8rem]">
+          <div className="rounded-3xl border border-white/[0.09] bg-[#0d131e]/80 p-5"><div className="flex items-center justify-between"><h2 className="flex items-center gap-2 text-sm font-semibold"><CircleGauge className="size-4 text-amber-300" /> Storage overview</h2><button type="button" onClick={() => void loadStatus()} disabled={Boolean(busy)} className="grid size-8 place-items-center rounded-lg text-slate-500 hover:text-white" aria-label="Refresh storage"><RefreshCw className={`size-3.5 ${busy === "status" ? "animate-spin" : ""}`} /></button></div>{statusError ? <div className="mt-4 rounded-2xl border border-rose-400/15 bg-rose-400/[0.05] p-4"><p className="text-sm font-semibold text-rose-200">OCI bridge not connected</p><p className="mt-1 text-xs leading-5 text-slate-500">{statusError}</p></div> : storage.length ? <div className="mt-4 space-y-3">{storage.map((item) => <StorageCard key={item.id} storage={item} />)}</div> : <div className="mt-4 h-28 animate-pulse rounded-2xl bg-white/[0.035]" />}</div>
+          <div className="rounded-3xl border border-white/[0.09] bg-[#0d131e]/80 p-5"><h2 className="flex items-center gap-2 text-sm font-semibold"><Server className="size-4 text-sky-300" /> Queue now</h2><div className="mt-4 grid grid-cols-3 gap-2">{[["Active", status?.queue?.downloading ?? "—"], ["Seeding", status?.queue?.seeding ?? "—"], ["Paused", status?.queue?.paused ?? "—"]].map(([label, value]) => <div key={label} className="rounded-xl bg-white/[0.035] px-2 py-3 text-center"><strong className="block text-lg text-white">{value}</strong><span className="text-[10px] uppercase tracking-wider text-slate-600">{label}</span></div>)}</div></div>
+        </aside>
+      </div>
+      <footer className="relative border-t border-white/[0.06] py-6 text-center text-[11px] text-slate-600">Private request portal · Requests stop automatically when storage reaches 95%.</footer>
+    </main>
+  );
+}
