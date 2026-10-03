@@ -1,7 +1,4 @@
-import { headers } from "next/headers";
-
-const USER_ID_HEADER = "oai-authenticated-user-id";
-const USER_EMAIL_HEADER = "oai-authenticated-user-email";
+import { getPortalSessionFingerprint } from "@/lib/portal-auth";
 const MAX_MAGNET_LENGTH = 8192;
 
 export class BridgeError extends Error {
@@ -39,14 +36,8 @@ export async function bridgeRequest(action: "status" | "library" | "poster" | "a
     throw new BridgeError(503, "OCI bridge not connected", "Add the n8n production webhook URL and portal token in the site environment.");
   }
 
-  const requestHeaders = await headers();
-  const userId = requestHeaders.get(USER_ID_HEADER);
-  const userEmail = requestHeaders.get(USER_EMAIL_HEADER);
-  const host = requestHeaders.get("host") || "";
-  const localPreview = host.startsWith("127.0.0.1") || host.startsWith("localhost");
-  if (!userId && !localPreview) {
-    throw new BridgeError(401, "Sign-in required", "Please sign in again before using the portal.");
-  }
+  const sessionId = await getPortalSessionFingerprint();
+  if (!sessionId) throw new BridgeError(401, "Sign-in required", "Please sign in again before using the portal.");
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 20_000);
@@ -56,8 +47,8 @@ export async function bridgeRequest(action: "status" | "library" | "poster" | "a
       headers: {
         "content-type": "application/json",
         "x-portal-token": bridgeToken,
-        "x-portal-user-id": userId || "local-preview",
-        "x-portal-user-email": userEmail || "local-preview",
+        "x-portal-user-id": sessionId,
+        "x-portal-user-email": "shared-family-access",
       },
       body: JSON.stringify({ action, ...payload }),
       signal: controller.signal,

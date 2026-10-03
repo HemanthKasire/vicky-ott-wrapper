@@ -41,10 +41,14 @@ repository:
 ```text
 N8N_TORRENT_BRIDGE_URL
 N8N_TORRENT_BRIDGE_TOKEN
+PORTAL_ACCESS_PASSWORD
+PORTAL_SESSION_SECRET
 ```
 
-Never commit their values. `.env*`, `.portal-token`, private keys, dependencies,
-and generated build output are ignored.
+Copy `.env.example` to `.env.local` for local development and replace every
+placeholder. Never commit the resulting values. `.env*` (except the safe
+example), `.portal-token`, private keys, dependencies, and generated build
+output are ignored.
 
 ## Checks
 
@@ -56,14 +60,26 @@ python3 -m py_compile server/torrent-portal.py
 
 ## Deployment
 
-The current ChatGPT Sites project metadata is retained in `.openai/hosting.json`.
-The planned VM deployment will clone this repository, store secrets only on the
-VM, run the web service privately, and expose it through the existing Caddy
-reverse proxy. VM deployment files will be added when that deployment is set up.
+The portal is configured for Vercel through Vinext and Nitro:
+
+1. Import this GitHub repository into Vercel.
+2. Leave the root directory as the repository root.
+3. Add all four variables from `.env.example` in Project Settings → Environment
+   Variables for Production and Preview.
+4. Deploy. `vercel.json` selects the Nitro framework and uses the locked npm
+   installation and build commands.
+5. Add the selected subdomain under Project Settings → Domains, then create the
+   CNAME record Vercel provides at the existing DNS provider.
+
+The shared password creates a signed, HTTP-only session cookie lasting 30 days.
+Changing `PORTAL_ACCESS_PASSWORD` affects new sign-ins. Changing
+`PORTAL_SESSION_SECRET` immediately invalidates all existing sessions.
 
 ## Security notes
 
 - Keep the repository private if infrastructure details are added later.
+- Use a unique portal password and generate a random session secret containing
+  at least 32 characters.
 - Keep qBittorrent and Jellyfin off the public internet.
 - Validate the shared portal token in n8n before executing any action.
 - Apply rate limits and an explicit user allowlist before sharing the portal.

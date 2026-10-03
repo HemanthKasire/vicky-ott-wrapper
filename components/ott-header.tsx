@@ -27,7 +27,7 @@ export function OttHeader({ connected }: { connected?: boolean }) {
 
         <div className="flex items-center gap-3">
           {typeof connected === "boolean" && <span className={`hidden items-center gap-2 rounded-full border px-3 py-1.5 text-xs lg:flex ${connected ? "border-emerald-400/20 text-emerald-300" : "border-rose-400/20 text-rose-300"}`}><span className={`size-1.5 rounded-full ${connected ? "bg-emerald-400" : "bg-rose-400"}`} />{connected ? "OCI connected" : "Bridge offline"}</span>}
-          <a href="/signout-with-chatgpt?return_to=/" className="grid size-9 place-items-center rounded-xl border border-white/[0.08] text-slate-400 transition hover:border-white/[0.16] hover:text-white" aria-label="Sign out"><LogOut className="size-4" /></a>
+          <a href="/api/auth/logout" className="grid size-9 place-items-center rounded-xl border border-white/[0.08] text-slate-400 transition hover:border-white/[0.16] hover:text-white" aria-label="Sign out"><LogOut className="size-4" /></a>
         </div>
       </div>
     </header>
