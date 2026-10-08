@@ -20,6 +20,17 @@ class TVRequests(unittest.TestCase):
   self.assertTrue(result['queued']);self.assertEqual(series[0].args[1],123)
   self.assertEqual(calls[0].kwargs['form']['savepath'],'/downloads/tv')
   self.assertEqual(calls[0].kwargs['form']['category'],'portal-tv')
+ def test_new_requests_disable_seeding(self):
+  _,_,calls=self.run_add({"magnet":"unused"})
+  self.assertEqual(calls[0].kwargs["form"]["ratioLimit"],"0")
+  self.assertEqual(calls[0].kwargs["form"]["seedingTimeLimit"],"0")
+ def test_resumed_requests_disable_seeding_before_start(self):
+  _,_,calls=self.run_add({"magnet":"unused"},{"category":""})
+  endpoints=[call.args[1] for call in calls]
+  self.assertLess(endpoints.index("/api/v2/torrents/setShareLimits"),endpoints.index("/api/v2/torrents/start"))
+  limits=calls[endpoints.index("/api/v2/torrents/setShareLimits")].kwargs["form"]
+  self.assertEqual(limits["seedingTimeLimit"],"0")
+  self.assertEqual(limits["shareLimitAction"],"Stop")
  def test_legacy_movies_keep_their_path(self):
   result,series,calls=self.run_add({'magnet':'unused'})
   self.assertTrue(result['queued']);self.assertFalse(series)

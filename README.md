@@ -95,7 +95,7 @@ recognisable episodes into `Shows/<Series>/Season <NN>/` and refreshes Jellyfin.
 Unclear episode names or a magnet for a different series require manual review.
 
 Sonarr uses a single `/data` mount for downloads and the Shows library so imports
-can use hardlinks while torrents seed. Its API stays private. The n8n bridge
+can use hardlinks during import. Its API stays private. The n8n bridge
 must forward `mediaType` and `tvdbId` for `add`, and support `series-search`
 with `{ "query": "show title" }`. Existing movie requests still use the movie
 organiser. No indexers are configured; only submitted magnets are downloaded.
@@ -122,3 +122,21 @@ Use `server/tv/install-manual-tv.sh` on the OCI host after deploying the updated
 helper. n8n must forward `manualTV: {title, season, episode}` instead of `tvdbId`
 for manual requests; `episode` can be `null`. Run both backend test files under
 `server/tv/` to verify request routing and manual sorting.
+
+### Stop seeding and clean imported TV downloads
+
+Torrent requests use zero seeding limits. The TV cleanup installer applies
+`configure-no-seeding.py` once to update existing torrents and global settings. The host also sets global zero limits
+with the Stop action, so completed downloads stop automatically. Uploads may
+still occur while a torrent is actively downloading.
+
+Install `server/tv/install-tv-cleanup.sh` after deploying the portal helper.
+Every minute the cleanup service checks completed `portal-tv` and
+`portal-tv-manual` torrents. It removes the torrent and its original download
+files only when every selected video is a verified hardlink in Shows. Manual
+imports must also be marked imported. Incomplete or unrecognised episodes are
+kept for review. Movies are excluded from this TV cleanup. Sonarr's own completed
+download removal stays disabled so there is only one cleanup owner.
+
+Run the installed cleanup helper with `--preview` to check without deleting.
+Import records remain available for status and Jellyfin refresh retries.

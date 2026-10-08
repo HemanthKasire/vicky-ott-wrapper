@@ -813,6 +813,9 @@ def inspect_action(config, payload):
             "paused": "false",
             "dlLimit": "1",
             "autoTMM": "false",
+            "ratioLimit": "0",
+            "seedingTimeLimit": "0",
+            "shareLimitAction": "Stop",
         })
         deadline = time.monotonic() + 42
         while time.monotonic() < deadline:
@@ -1165,6 +1168,10 @@ def add_action(config, payload):
             "hashes": info_hash,
             "limit": "0",
         })
+        qb_request(config, "/api/v2/torrents/setShareLimits", method="POST", form={
+            "hashes": info_hash, "ratioLimit": "0", "seedingTimeLimit": "0",
+            "inactiveSeedingTimeLimit": "0", "shareLimitAction": "Stop",
+        })
         qb_request(config, "/api/v2/torrents/start", method="POST", form={"hashes": info_hash})
         message = "This torrent already existed in qBittorrent and has been started."
     else:
@@ -1176,6 +1183,9 @@ def add_action(config, payload):
             "stopped": "false",
             "paused": "false",
             "autoTMM": "false",
+            "ratioLimit": "0",
+            "seedingTimeLimit": "0",
+            "shareLimitAction": "Stop",
         })
         message = "Torrent request was added to the download queue."
 
