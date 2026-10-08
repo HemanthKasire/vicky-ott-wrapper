@@ -29,7 +29,7 @@ export function parseMagnet(value: unknown) {
   return { magnet: value, infoHash: btih.toUpperCase() };
 }
 
-export async function bridgeRequest(action: "status" | "library" | "poster" | "add", payload: Record<string, unknown> = {}) {
+export async function bridgeRequest(action: "status" | "library" | "poster" | "add" | "series-search", payload: Record<string, unknown> = {}) {
   const bridgeUrl = process.env.N8N_TORRENT_BRIDGE_URL;
   const bridgeToken = process.env.N8N_TORRENT_BRIDGE_TOKEN;
   if (!bridgeUrl || !bridgeToken) {
@@ -40,7 +40,7 @@ export async function bridgeRequest(action: "status" | "library" | "poster" | "a
   if (!sessionId) throw new BridgeError(401, "Sign-in required", "Please sign in again before using the portal.");
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 20_000);
+  const timeout = setTimeout(() => controller.abort(), 45_000);
   try {
     const response = await fetch(bridgeUrl, {
       method: "POST",

@@ -71,3 +71,15 @@ Return HTTP 200 with:
 ```json
 { "queued": true, "message": "Example Movie was added to the download queue." }
 ```
+
+## TV extensions
+
+The current direct `add` flow accepts `magnet`, `infoHash`, and `mediaType`
+(`movie` or `show`, default `movie`). A show request also requires a positive
+integer `tvdbId` selected from `series-search`. The server rechecks mounted
+storage and the 95% capacity limit. The legacy inspection flow above is not
+used by the current portal.
+
+`series-search` accepts `{ "action": "series-search", "query": "show title" }`
+and returns `{ "items": [{ "tvdbId": 123, "title": "Example", "year": 2024 }] }`.
+Keep this action behind the same authenticated bridge as other requests.

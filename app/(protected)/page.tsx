@@ -18,6 +18,7 @@ type StatusPayload = {
 type AddPayload = {
   queued: boolean; storageFull?: boolean; storageUsagePercent?: number; message?: string;
 };
+type Series = { tvdbId: number; title: string; year?: number };
 type ApiError = { error?: string; detail?: string };
 
 function formatBytes(bytes: number) {
@@ -60,6 +61,12 @@ function StorageCard({ storage }: { storage: Storage }) {
 
 export default function Home() {
   const [magnet, setMagnet] = useState("");
+  const [mediaType, setMediaType] = useState<"movie" | "show">("movie");
+  const [showQuery, setShowQuery] = useState("");
+  const [series, setSeries] = useState<Series[]>([]);
+  const [selectedSeries, setSelectedSeries] = useState<Series | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [showError, setShowError] = useState("");
   const [status, setStatus] = useState<StatusPayload | null>(null);
   const [statusError, setStatusError] = useState("");
   const [busy, setBusy] = useState<"status" | "add" | "">("");
@@ -83,6 +90,24 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, [loadStatus]);
 
+  async function searchShows() {
+    setSearching(true);
+    setShowError("");
+    setSeries([]);
+    setSelectedSeries(null);
+    try {
+      const response = await fetch("/api/torrent/series", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ query: showQuery.trim() }),
+      });
+      const data = await readJson<{ items: Series[] }>(response);
+      setSeries(data.items);
+      if (!data.items.length) setShowError("No shows found. Try another title.");
+    } catch (error) {
+      setShowError(error instanceof Error ? error.message : "Could not search shows");
+    } finally { setSearching(false); }
+  }
+
   async function addTorrent() {
     const trimmed = magnet.trim();
     setNotice(null);
@@ -90,12 +115,16 @@ export default function Home() {
       setNotice({ kind: "error", text: "Paste a magnet link beginning with magnet:?" });
       return;
     }
+    if (mediaType === "show" && !selectedSeries) {
+      setNotice({ kind: "error", text: "Search for and select the TV show first." });
+      return;
+    }
     setBusy("add");
     try {
       const response = await fetch("/api/torrent/add", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ magnet: trimmed }),
+        body: JSON.stringify({ magnet: trimmed, mediaType, ...(mediaType === "show" ? { tvdbId: selectedSeries?.tvdbId } : {}) }),
       });
       const data = await readJson<AddPayload>(response);
       if (data.storageFull || !data.queued) {
@@ -121,11 +150,33 @@ export default function Home() {
 
       <div className="relative mx-auto grid max-w-7xl gap-6 px-4 py-8 sm:px-6 lg:grid-cols-[minmax(0,1fr)_360px] lg:px-8 lg:py-12">
         <section>
-          <div className="mb-8 max-w-3xl"><h1 className="text-3xl font-bold tracking-[-0.035em] text-white sm:text-5xl">Add a movie request.</h1><p className="mt-4 max-w-2xl text-sm leading-6 text-slate-400 sm:text-base">Paste a magnet link. The server checks storage immediately and adds it to qBittorrent when the media volume is below 95% usage.</p></div>
+          <div className="mb-8 max-w-3xl"><h1 className="text-3xl font-bold tracking-[-0.035em] text-white sm:text-5xl">Add a movie or TV show.</h1><p className="mt-4 max-w-2xl text-sm leading-6 text-slate-400 sm:text-base">Choose a movie or TV show and paste a magnet link. TV episodes are automatically organised into show and season folders after downloading.</p></div>
           <div className="rounded-3xl border border-white/[0.09] bg-[#0d131e]/90 p-5 shadow-[0_30px_80px_rgb(0_0_0/35%)] sm:p-7">
-            <label htmlFor="magnet" className="mb-3 flex items-center justify-between gap-3"><span className="flex items-center gap-2 text-sm font-semibold"><Link2 className="size-4 text-amber-300" /> Magnet link</span><span className="text-[11px] text-slate-500">Movies only · legal content</span></label>
+            <fieldset className="mb-5" disabled={Boolean(busy) || searching}>
+              <legend className="mb-2 text-sm font-semibold">What are you adding?</legend>
+              <div className="flex gap-3">{([["movie", "Movie"], ["show", "TV Show"]] as const).map(([value, label]) => (
+                <label key={value} className="flex cursor-pointer items-center gap-2 rounded-xl border border-white/10 px-4 py-3 text-sm">
+                  <input type="radio" name="mediaType" value={value} checked={mediaType === value} onChange={() => { setMediaType(value); setNotice(null); }} className="accent-amber-400" />{label}
+                </label>
+              ))}</div>
+            </fieldset>
+            {mediaType === "show" && <div className="mb-5">
+              <label htmlFor="show-search" className="mb-2 block text-sm font-semibold">Find your show</label>
+              <div className="flex gap-2">
+                <input id="show-search" value={showQuery} disabled={searching || Boolean(busy)} onChange={(event) => { setShowQuery(event.target.value); setSelectedSeries(null); setSeries([]); }} onKeyDown={(event) => { if (event.key === "Enter" && showQuery.trim().length >= 2 && !searching) void searchShows(); }} placeholder="Enter the show title" maxLength={120} className="min-w-0 flex-1 rounded-xl border border-white/10 bg-[#080d15] px-4 py-3 text-sm" />
+                <button type="button" onClick={() => void searchShows()} disabled={searching || Boolean(busy) || showQuery.trim().length < 2} className="rounded-xl bg-white/10 px-4 text-sm disabled:opacity-40">{searching ? "Searching…" : "Search"}</button>
+              </div>
+              {showError && <p role="alert" className="mt-2 text-sm text-rose-200">{showError}</p>}
+              {series.length > 0 && <div className="mt-3 max-h-56 space-y-2 overflow-y-auto" role="radiogroup" aria-label="Matching shows">{series.map((show) => (
+                <label key={show.tvdbId} className={`flex cursor-pointer items-center gap-3 rounded-xl border px-4 py-3 text-sm ${selectedSeries?.tvdbId === show.tvdbId ? "border-amber-400/50 bg-amber-400/10" : "border-white/10"}`}>
+                  <input type="radio" name="selectedShow" disabled={Boolean(busy)} checked={selectedSeries?.tvdbId === show.tvdbId} onChange={() => setSelectedSeries(show)} className="accent-amber-400" />{show.title}{show.year ? ` (${show.year})` : ""}
+                </label>
+              ))}</div>}
+              <p className="mt-2 text-xs text-slate-500">Choose the matching series. Clear episode names such as S01E02 help automatic sorting.</p>
+            </div>}
+            <label htmlFor="magnet" className="mb-3 flex items-center justify-between gap-3"><span className="flex items-center gap-2 text-sm font-semibold"><Link2 className="size-4 text-amber-300" /> Magnet link</span><span className="text-[11px] text-slate-500">Movies & TV shows · legal content</span></label>
             <textarea id="magnet" value={magnet} onChange={(event) => { setMagnet(event.target.value); setNotice(null); }} placeholder="magnet:?xt=urn:btih:…" rows={4} spellCheck={false} className="w-full resize-none rounded-2xl border border-white/[0.09] bg-[#080d15] px-4 py-4 font-mono text-sm leading-6 text-slate-200 outline-none transition placeholder:text-slate-700 focus:border-amber-400/50 focus:ring-4 focus:ring-amber-400/[0.06]" />
-            <div className="mt-4 flex flex-col-reverse items-stretch justify-between gap-3 sm:flex-row sm:items-center"><p className="flex items-center gap-2 text-xs text-slate-500"><ShieldCheck className="size-4 text-emerald-400" />Storage is rechecked before every request.</p><button type="button" onClick={addTorrent} disabled={!magnet.trim() || Boolean(busy)} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-amber-400 px-5 text-sm font-bold text-slate-950 transition hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-40">{busy === "add" ? <LoaderCircle className="size-4 animate-spin" /> : <Plus className="size-4" />}{busy === "add" ? "Checking storage…" : "Add torrent"}</button></div>
+            <div className="mt-4 flex flex-col-reverse items-stretch justify-between gap-3 sm:flex-row sm:items-center"><p className="flex items-center gap-2 text-xs text-slate-500"><ShieldCheck className="size-4 text-emerald-400" />Storage is rechecked before every request.</p><button type="button" onClick={addTorrent} disabled={!magnet.trim() || Boolean(busy) || searching || (mediaType === "show" && !selectedSeries)} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-amber-400 px-5 text-sm font-bold text-slate-950 transition hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-40">{busy === "add" ? <LoaderCircle className="size-4 animate-spin" /> : <Plus className="size-4" />}{busy === "add" ? "Checking storage…" : "Add torrent"}</button></div>
           </div>
           {notice && <div className={`mt-5 flex items-start gap-3 rounded-2xl border p-4 text-sm ${notice.kind === "success" ? "border-emerald-400/20 bg-emerald-400/[0.07] text-emerald-200" : "border-rose-400/20 bg-rose-400/[0.07] text-rose-200"}`}>{notice.kind === "success" ? <CheckCircle2 className="mt-0.5 size-4 shrink-0" /> : <XCircle className="mt-0.5 size-4 shrink-0" />}<p>{notice.text}</p></div>}
         </section>

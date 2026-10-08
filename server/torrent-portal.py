@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import time
+import xml.etree.ElementTree as ET
 import urllib.parse
 import urllib.error
 import urllib.request
@@ -490,6 +491,8 @@ def duplicate_check_action(config):
     checked = 0
     pending_metadata = 0
     for torrent in get_torrents(config):
+        if torrent.get("category") == "portal-tv":
+            continue
         tags = {tag.strip() for tag in str(torrent.get("tags", "")).split(",") if tag.strip()}
         if "portal-request" not in tags:
             continue
@@ -556,6 +559,8 @@ def duplicate_check_one_action(config, payload):
         fail("Invalid duplicate-check info hash", 400)
 
     torrent = find_torrent(config, info_hash)
+    if torrent and torrent.get("category") == "portal-tv":
+        emit({"ready": True, "duplicate": False, "infoHash": info_hash.upper()})
     if not torrent:
         emit({
             "ready": False,
@@ -856,7 +861,58 @@ def inspect_action(config, payload):
     })
 
 
+def sonarr_request(config, endpoint, method="GET", payload=None):
+    try:
+        api_key = ET.parse("/home/ubuntu/sonarr/config/config.xml").getroot().findtext("ApiKey")
+        address = subprocess.check_output([
+            "docker", "inspect", config["QB_CONTAINER"], "--format",
+            "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}",
+        ], text=True).split()[0]
+        data = json.dumps(payload).encode() if payload is not None else None
+        request = urllib.request.Request(
+            f"http://{address}:8989/api/v3/{endpoint}", data=data, method=method,
+            headers={"X-Api-Key": api_key, "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.load(response)
+    except (OSError, ValueError, ET.ParseError, subprocess.CalledProcessError, IndexError):
+        fail("TV sorting service is unavailable. Please try again shortly.", 503)
+
+
+def series_search_action(config, payload):
+    query = payload.get("query", "")
+    if not isinstance(query, str) or not 2 <= len(query.strip()) <= 120:
+        fail("Enter a show name between 2 and 120 characters.", 400)
+    items = sonarr_request(config, "series/lookup?" + urllib.parse.urlencode({"term": query.strip()}))
+    emit({"items": [{"tvdbId": item["tvdbId"], "title": item["title"], "year": item.get("year")}
+                    for item in items[:20]]})
+
+
+def ensure_tv_series(config, tvdb_id):
+    if type(tvdb_id) is not int or tvdb_id <= 0:
+        fail("Select the TV show before adding its torrent.", 400)
+    for series in sonarr_request(config, "series"):
+        if series.get("tvdbId") == tvdb_id:
+            return series
+    matches = sonarr_request(config, f"series/lookup?term=tvdb:{tvdb_id}")
+    if len(matches) != 1 or matches[0].get("tvdbId") != tvdb_id:
+        fail("The selected TV show could not be found.", 400)
+    profiles = sonarr_request(config, "qualityprofile")
+    profile = next((p for p in profiles if p.get("name") == "Any"), profiles[0])
+    series = matches[0]
+    series.update({
+        "rootFolderPath": "/data/shows", "qualityProfileId": profile["id"],
+        "monitored": False, "seasonFolder": True,
+        "addOptions": {"monitor": "none", "searchForMissingEpisodes": False,
+                       "searchForCutoffUnmetEpisodes": False},
+    })
+    return sonarr_request(config, "series", "POST", series)
+
+
 def add_action(config, payload):
+    media_type = payload.get("mediaType", "movie")
+    if media_type not in {"movie", "show"}:
+        fail("Choose Movie or TV Show.", 400)
     info_hash = validate_magnet(payload.get("magnet"))
     storage = storage_status(config)
     if not storage["mounted"]:
@@ -875,7 +931,15 @@ def add_action(config, payload):
             "message": "Storage is 95% full or higher. Please try again later.",
         })
 
+    if media_type == "show":
+        ensure_tv_series(config, payload.get("tvdbId"))
+    save_path = "/downloads/tv" if media_type == "show" else config["QB_SAVE_PATH"]
+    category = "portal-tv" if media_type == "show" else ""
     torrent = find_torrent(config, info_hash)
+    if torrent and media_type == "show" and torrent.get("category") != category:
+        fail("This torrent already exists outside TV downloads. Review it in qBittorrent first.", 409)
+    if torrent and media_type == "movie" and torrent.get("category") == "portal-tv":
+        fail("This torrent is already a TV download.", 409)
     if torrent:
         qb_request(config, "/api/v2/torrents/addTags", method="POST", form={
             "hashes": info_hash,
@@ -890,7 +954,8 @@ def add_action(config, payload):
     else:
         qb_request(config, "/api/v2/torrents/add", method="POST", form={
             "urls": payload.get("magnet"),
-            "savepath": config["QB_SAVE_PATH"],
+            "savepath": save_path,
+            "category": category,
             "tags": "portal-request",
             "stopped": "false",
             "paused": "false",
@@ -899,11 +964,13 @@ def add_action(config, payload):
         message = "Torrent request was added to the download queue."
 
     emit({
+        "mediaType": media_type,
         "queued": True,
         "storageFull": False,
         "storageUsagePercent": round(usage_percent, 2),
         "infoHash": info_hash.upper(),
-        "message": message,
+        "message": ("TV torrent added. Episodes will be sorted into Shows after downloading."
+                    if media_type == "show" else message),
     })
 
 
@@ -922,10 +989,12 @@ def main():
         cleanup_old_torrents_action(config, True)
     if action == "cleanup-old":
         cleanup_old_torrents_action(config, False)
-    if action in {"add", "poster", "duplicate-check-one", "duplicate-ack"}:
+    if action in {"add", "series-search", "poster", "duplicate-check-one", "duplicate-ack"}:
         if len(sys.argv) != 3:
             fail(f"The {action} action requires an encoded payload", 400)
         payload = parse_payload(sys.argv[2])
+        if action == "series-search":
+            series_search_action(config, payload)
         if action == "poster":
             poster_action(config, payload)
         if action == "duplicate-check-one":

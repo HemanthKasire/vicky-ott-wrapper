@@ -84,3 +84,20 @@ Changing `PORTAL_ACCESS_PASSWORD` affects new sign-ins. Changing
 - Validate the shared portal token in n8n before executing any action.
 - Apply rate limits and an explicit user allowlist before sharing the portal.
 - Do not commit API keys, webhook tokens, SSH keys, cookies, or `.env` files.
+
+## TV show requests
+
+Choose **TV Show**, search for the series, select the correct title/year, and
+paste a magnet link for that series. The portal registers the selected series
+with Sonarr without searching for additional releases. qBittorrent downloads
+into `/downloads/tv` with category `portal-tv`. Sonarr imports completed
+recognisable episodes into `Shows/<Series>/Season <NN>/` and refreshes Jellyfin.
+Unclear episode names or a magnet for a different series require manual review.
+
+Sonarr uses a single `/data` mount for downloads and the Shows library so imports
+can use hardlinks while torrents seed. Its API stays private. The n8n bridge
+must forward `mediaType` and `tvdbId` for `add`, and support `series-search`
+with `{ "query": "show title" }`. Existing movie requests still use the movie
+organiser. No indexers are configured; only submitted magnets are downloaded.
+
+Backend checks: `python3 server/tv/test_tv_requests.py`.

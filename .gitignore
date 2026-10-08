@@ -50,3 +50,7 @@ next-env.d.ts
 /outputs/
 /work/
 /.portal-token
+
+# Python runtime cache
+__pycache__/
+*.py[cod]
