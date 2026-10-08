@@ -140,3 +140,23 @@ download removal stays disabled so there is only one cleanup owner.
 
 Run the installed cleanup helper with `--preview` to check without deleting.
 Import records remain available for status and Jellyfin refresh retries.
+
+### Clean imported movie downloads
+
+Install `server/movies/install-movie-cleanup.sh` on the OCI host. The existing
+movie organizer continues moving films and subtitles into Movies and requesting
+Jellyfin refreshes. A separate timer checks completed, uncategorized torrents in
+`/downloads/complete` every minute, then removes the torrent entry and original
+download leftovers only after every selected video has a verified library copy.
+TV torrents and other download locations are excluded.
+
+Verification uses hardlink identity where available. For files already moved or
+copied, it checks exact size and first, middle, and last independently readable
+pieces against qBittorrent's torrent hashes. This is sampled content verification,
+not a full integrity scan. Unsupported metadata, incomplete or missing videos,
+unsafe paths, and hash mismatches keep the torrent for review. Piece reads are
+bounded at 32 MiB each, with low CPU priority and a 20% service CPU limit.
+
+Run `/usr/local/bin/portal-movie-cleanup.py --preview` as root to verify without
+deleting; cleanup manifests are private under `/var/lib/torrent-portal/movie-cleanup`.
+Backend checks: `python3 -m unittest discover -s server/movies`.
