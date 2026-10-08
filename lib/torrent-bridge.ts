@@ -64,7 +64,9 @@ export async function bridgeRequest(action: "status" | "library" | "poster" | "a
     return data;
   } catch (error) {
     if (error instanceof BridgeError) throw error;
-    if (error instanceof Error && error.name === "AbortError") throw new BridgeError(504, "OCI request timed out", "The OCI bridge did not answer in time.");
+    if (error instanceof Error && error.name === "AbortError") throw new BridgeError(504, "OCI request timed out", action === "add"
+      ? "The OCI bridge did not answer in time. The torrent may still have been added. Check qBittorrent before retrying."
+      : "The OCI bridge did not answer in time.");
     throw new BridgeError(502, "Could not reach OCI", error instanceof Error ? error.message : "Network request failed");
   } finally { clearTimeout(timeout); }
 }

@@ -4,7 +4,7 @@ import {
   AlertTriangle, CheckCircle2, CircleGauge, HardDrive, Link2,
   LoaderCircle, Plus, RefreshCw, Server, ShieldCheck, XCircle,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { OttHeader } from "@/components/ott-header";
 
 type Storage = {
@@ -69,25 +69,54 @@ export default function Home() {
   const [showError, setShowError] = useState("");
   const [status, setStatus] = useState<StatusPayload | null>(null);
   const [statusError, setStatusError] = useState("");
-  const [busy, setBusy] = useState<"status" | "add" | "">("");
+  const [statusBusy, setStatusBusy] = useState(false);
+  const [addBusy, setAddBusy] = useState(false);
+  const [skipConnectionCheck, setSkipConnectionCheck] = useState(false);
+  const statusRequest = useRef<AbortController | null>(null);
+  const controlsBusy = addBusy || (statusBusy && !skipConnectionCheck);
   const [notice, setNotice] = useState<{ kind: "success" | "error"; text: string } | null>(null);
 
   const loadStatus = useCallback(async () => {
-    setBusy((current) => current || "status");
+    statusRequest.current?.abort();
+    const controller = new AbortController();
+    statusRequest.current = controller;
+    setStatusBusy(true);
+    const timeout = window.setTimeout(() => controller.abort(), 20_000);
     try {
-      const response = await fetch("/api/torrent/status", { cache: "no-store" });
-      setStatus(await readJson<StatusPayload>(response));
-      setStatusError("");
+      const response = await fetch("/api/torrent/status", { cache: "no-store", signal: controller.signal });
+      const data = await readJson<StatusPayload>(response);
+      if (statusRequest.current !== controller) return;
+      setStatus(data);
+      setStatusError(data.connected ? "" : "The connection check could not confirm OCI is available.");
     } catch (error) {
-      setStatusError(error instanceof Error ? error.message : "Could not reach the OCI bridge");
+      if (statusRequest.current !== controller) return;
+      setStatusError(error instanceof Error && error.name === "AbortError"
+        ? "The connection check timed out. You can skip it and try adding your torrent."
+        : error instanceof Error ? error.message : "Could not reach the OCI bridge");
     } finally {
-      setBusy((current) => current === "status" ? "" : current);
+      window.clearTimeout(timeout);
+      if (statusRequest.current === controller) {
+        statusRequest.current = null;
+        setStatusBusy(false);
+      }
     }
   }, []);
 
+  function skipCheck() {
+    const request = statusRequest.current;
+    statusRequest.current = null;
+    request?.abort();
+    setStatusBusy(false);
+    setSkipConnectionCheck(true);
+  }
+
   useEffect(() => {
     const timer = window.setTimeout(() => void loadStatus(), 0);
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(timer);
+      statusRequest.current?.abort();
+      statusRequest.current = null;
+    };
   }, [loadStatus]);
 
   async function searchShows() {
@@ -119,10 +148,14 @@ export default function Home() {
       setNotice({ kind: "error", text: "Search for and select the TV show first." });
       return;
     }
-    setBusy("add");
+    if (addBusy) return;
+    setAddBusy(true);
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 60_000);
     try {
       const response = await fetch("/api/torrent/add", {
         method: "POST",
+        signal: controller.signal,
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ magnet: trimmed, mediaType, ...(mediaType === "show" ? { tvdbId: selectedSeries?.tvdbId } : {}) }),
       });
@@ -133,11 +166,14 @@ export default function Home() {
         setNotice({ kind: "success", text: data.message || "Torrent request was added to the download queue." });
         setMagnet("");
       }
-      void loadStatus();
+      if (!skipConnectionCheck) void loadStatus();
     } catch (error) {
-      setNotice({ kind: "error", text: error instanceof Error ? error.message : "Could not add torrent" });
+      setNotice({ kind: "error", text: error instanceof Error && error.name === "AbortError"
+        ? "No add response arrived in time. The torrent may still have been added. Check qBittorrent before retrying."
+        : error instanceof Error ? error.message : "Could not add torrent" });
     } finally {
-      setBusy("");
+      window.clearTimeout(timeout);
+      setAddBusy(false);
     }
   }
 
@@ -152,7 +188,7 @@ export default function Home() {
         <section>
           <div className="mb-8 max-w-3xl"><h1 className="text-3xl font-bold tracking-[-0.035em] text-white sm:text-5xl">Add a movie or TV show.</h1><p className="mt-4 max-w-2xl text-sm leading-6 text-slate-400 sm:text-base">Choose a movie or TV show and paste a magnet link. TV episodes are automatically organised into show and season folders after downloading.</p></div>
           <div className="rounded-3xl border border-white/[0.09] bg-[#0d131e]/90 p-5 shadow-[0_30px_80px_rgb(0_0_0/35%)] sm:p-7">
-            <fieldset className="mb-5" disabled={Boolean(busy) || searching}>
+            <fieldset className="mb-5" disabled={controlsBusy || searching}>
               <legend className="mb-2 text-sm font-semibold">What are you adding?</legend>
               <div className="flex gap-3">{([["movie", "Movie"], ["show", "TV Show"]] as const).map(([value, label]) => (
                 <label key={value} className="flex cursor-pointer items-center gap-2 rounded-xl border border-white/10 px-4 py-3 text-sm">
@@ -163,26 +199,33 @@ export default function Home() {
             {mediaType === "show" && <div className="mb-5">
               <label htmlFor="show-search" className="mb-2 block text-sm font-semibold">Find your show</label>
               <div className="flex gap-2">
-                <input id="show-search" value={showQuery} disabled={searching || Boolean(busy)} onChange={(event) => { setShowQuery(event.target.value); setSelectedSeries(null); setSeries([]); }} onKeyDown={(event) => { if (event.key === "Enter" && showQuery.trim().length >= 2 && !searching) void searchShows(); }} placeholder="Enter the show title" maxLength={120} className="min-w-0 flex-1 rounded-xl border border-white/10 bg-[#080d15] px-4 py-3 text-sm" />
-                <button type="button" onClick={() => void searchShows()} disabled={searching || Boolean(busy) || showQuery.trim().length < 2} className="rounded-xl bg-white/10 px-4 text-sm disabled:opacity-40">{searching ? "Searching…" : "Search"}</button>
+                <input id="show-search" value={showQuery} disabled={searching || controlsBusy} onChange={(event) => { setShowQuery(event.target.value); setSelectedSeries(null); setSeries([]); }} onKeyDown={(event) => { if (event.key === "Enter" && showQuery.trim().length >= 2 && !searching) void searchShows(); }} placeholder="Enter the show title" maxLength={120} className="min-w-0 flex-1 rounded-xl border border-white/10 bg-[#080d15] px-4 py-3 text-sm" />
+                <button type="button" onClick={() => void searchShows()} disabled={searching || controlsBusy || showQuery.trim().length < 2} className="rounded-xl bg-white/10 px-4 text-sm disabled:opacity-40">{searching ? "Searching…" : "Search"}</button>
               </div>
               {showError && <p role="alert" className="mt-2 text-sm text-rose-200">{showError}</p>}
               {series.length > 0 && <div className="mt-3 max-h-56 space-y-2 overflow-y-auto" role="radiogroup" aria-label="Matching shows">{series.map((show) => (
                 <label key={show.tvdbId} className={`flex cursor-pointer items-center gap-3 rounded-xl border px-4 py-3 text-sm ${selectedSeries?.tvdbId === show.tvdbId ? "border-amber-400/50 bg-amber-400/10" : "border-white/10"}`}>
-                  <input type="radio" name="selectedShow" disabled={Boolean(busy)} checked={selectedSeries?.tvdbId === show.tvdbId} onChange={() => setSelectedSeries(show)} className="accent-amber-400" />{show.title}{show.year ? ` (${show.year})` : ""}
+                  <input type="radio" name="selectedShow" disabled={controlsBusy} checked={selectedSeries?.tvdbId === show.tvdbId} onChange={() => setSelectedSeries(show)} className="accent-amber-400" />{show.title}{show.year ? ` (${show.year})` : ""}
                 </label>
               ))}</div>}
               <p className="mt-2 text-xs text-slate-500">Choose the matching series. Clear episode names such as S01E02 help automatic sorting.</p>
             </div>}
             <label htmlFor="magnet" className="mb-3 flex items-center justify-between gap-3"><span className="flex items-center gap-2 text-sm font-semibold"><Link2 className="size-4 text-amber-300" /> Magnet link</span><span className="text-[11px] text-slate-500">Movies & TV shows · legal content</span></label>
             <textarea id="magnet" value={magnet} onChange={(event) => { setMagnet(event.target.value); setNotice(null); }} placeholder="magnet:?xt=urn:btih:…" rows={4} spellCheck={false} className="w-full resize-none rounded-2xl border border-white/[0.09] bg-[#080d15] px-4 py-4 font-mono text-sm leading-6 text-slate-200 outline-none transition placeholder:text-slate-700 focus:border-amber-400/50 focus:ring-4 focus:ring-amber-400/[0.06]" />
-            <div className="mt-4 flex flex-col-reverse items-stretch justify-between gap-3 sm:flex-row sm:items-center"><p className="flex items-center gap-2 text-xs text-slate-500"><ShieldCheck className="size-4 text-emerald-400" />Storage is rechecked before every request.</p><button type="button" onClick={addTorrent} disabled={!magnet.trim() || Boolean(busy) || searching || (mediaType === "show" && !selectedSeries)} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-amber-400 px-5 text-sm font-bold text-slate-950 transition hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-40">{busy === "add" ? <LoaderCircle className="size-4 animate-spin" /> : <Plus className="size-4" />}{busy === "add" ? "Checking storage…" : "Add torrent"}</button></div>
+            <div className="mt-4 rounded-xl border border-white/10 bg-white/[0.025] p-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <p className="text-xs text-slate-400">{skipConnectionCheck ? "Connection check skipped. You can submit and read the server’s response." : statusBusy ? "Checking the OCI connection…" : statusError || status?.connected === false ? "Connection check unavailable. You can still try submitting." : "Connection checks can be skipped if they become unavailable."}</p>
+                <button type="button" onClick={skipCheck} disabled={skipConnectionCheck || addBusy} className="shrink-0 rounded-lg border border-amber-400/30 px-3 py-2 text-xs font-semibold text-amber-200 hover:bg-amber-400/10 disabled:opacity-50">{skipConnectionCheck ? "Connection check skipped" : "Skip connection check"}</button>
+              </div>
+              {skipConnectionCheck && <p className="mt-2 text-xs text-slate-500">The server still checks storage. If the add request times out, check qBittorrent before retrying.</p>}
+            </div>
+            <div className="mt-4 flex flex-col-reverse items-stretch justify-between gap-3 sm:flex-row sm:items-center"><p className="flex items-center gap-2 text-xs text-slate-500"><ShieldCheck className="size-4 text-emerald-400" />Storage is rechecked before every request.</p><button type="button" onClick={addTorrent} disabled={!magnet.trim() || controlsBusy || searching || (mediaType === "show" && !selectedSeries)} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-amber-400 px-5 text-sm font-bold text-slate-950 transition hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-40">{addBusy ? <LoaderCircle className="size-4 animate-spin" /> : <Plus className="size-4" />}{addBusy ? "Adding torrent…" : "Add torrent"}</button></div>
           </div>
-          {notice && <div className={`mt-5 flex items-start gap-3 rounded-2xl border p-4 text-sm ${notice.kind === "success" ? "border-emerald-400/20 bg-emerald-400/[0.07] text-emerald-200" : "border-rose-400/20 bg-rose-400/[0.07] text-rose-200"}`}>{notice.kind === "success" ? <CheckCircle2 className="mt-0.5 size-4 shrink-0" /> : <XCircle className="mt-0.5 size-4 shrink-0" />}<p>{notice.text}</p></div>}
+          {notice && <div role="status" aria-live="polite" className={`mt-5 flex items-start gap-3 rounded-2xl border p-4 text-sm ${notice.kind === "success" ? "border-emerald-400/20 bg-emerald-400/[0.07] text-emerald-200" : "border-rose-400/20 bg-rose-400/[0.07] text-rose-200"}`}>{notice.kind === "success" ? <CheckCircle2 className="mt-0.5 size-4 shrink-0" /> : <XCircle className="mt-0.5 size-4 shrink-0" />}<p>{notice.text}</p></div>}
         </section>
 
         <aside className="space-y-5 lg:pt-[6.8rem]">
-          <div className="rounded-3xl border border-white/[0.09] bg-[#0d131e]/80 p-5"><div className="flex items-center justify-between"><h2 className="flex items-center gap-2 text-sm font-semibold"><CircleGauge className="size-4 text-amber-300" /> Storage overview</h2><button type="button" onClick={() => void loadStatus()} disabled={Boolean(busy)} className="grid size-8 place-items-center rounded-lg text-slate-500 hover:text-white" aria-label="Refresh storage"><RefreshCw className={`size-3.5 ${busy === "status" ? "animate-spin" : ""}`} /></button></div>{statusError ? <div className="mt-4 rounded-2xl border border-rose-400/15 bg-rose-400/[0.05] p-4"><p className="text-sm font-semibold text-rose-200">OCI bridge not connected</p><p className="mt-1 text-xs leading-5 text-slate-500">{statusError}</p></div> : storage.length ? <div className="mt-4 space-y-3">{storage.map((item) => <StorageCard key={item.id} storage={item} />)}</div> : <div className="mt-4 h-28 animate-pulse rounded-2xl bg-white/[0.035]" />}</div>
+          <div className="rounded-3xl border border-white/[0.09] bg-[#0d131e]/80 p-5"><div className="flex items-center justify-between"><h2 className="flex items-center gap-2 text-sm font-semibold"><CircleGauge className="size-4 text-amber-300" /> Storage overview</h2><button type="button" onClick={() => { setSkipConnectionCheck(false); void loadStatus(); }} disabled={addBusy || statusBusy} className="grid size-8 place-items-center rounded-lg text-slate-500 hover:text-white" aria-label="Refresh storage"><RefreshCw className={`size-3.5 ${statusBusy ? "animate-spin" : ""}`} /></button></div>{statusError ? <div className="mt-4 rounded-2xl border border-rose-400/15 bg-rose-400/[0.05] p-4"><p className="text-sm font-semibold text-rose-200">Connection check unavailable</p><p className="mt-1 text-xs leading-5 text-slate-500">{statusError}</p></div> : storage.length ? <div className="mt-4 space-y-3">{storage.map((item) => <StorageCard key={item.id} storage={item} />)}</div> : skipConnectionCheck ? <p className="mt-4 text-xs leading-5 text-slate-500">Connection check skipped. Use Refresh storage to check again.</p> : <div className="mt-4 h-28 animate-pulse rounded-2xl bg-white/[0.035]" />}</div>
           <div className="rounded-3xl border border-white/[0.09] bg-[#0d131e]/80 p-5"><h2 className="flex items-center gap-2 text-sm font-semibold"><Server className="size-4 text-sky-300" /> Queue now</h2><div className="mt-4 grid grid-cols-3 gap-2">{[["Active", status?.queue?.downloading ?? "—"], ["Seeding", status?.queue?.seeding ?? "—"], ["Paused", status?.queue?.paused ?? "—"]].map(([label, value]) => <div key={label} className="rounded-xl bg-white/[0.035] px-2 py-3 text-center"><strong className="block text-lg text-white">{value}</strong><span className="text-[10px] uppercase tracking-wider text-slate-600">{label}</span></div>)}</div></div>
         </aside>
       </div>
