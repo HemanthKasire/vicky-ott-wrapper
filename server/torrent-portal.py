@@ -22,6 +22,7 @@ CONFIG_FILE = "/etc/torrent-portal/qbittorrent.conf"
 JELLYFIN_CONFIG_FILE = "/etc/torrent-portal/jellyfin.conf"
 INSPECTION_DIR = Path("/var/lib/torrent-portal/inspections")
 INSPECTION_TTL_SECONDS = 15 * 60
+MANUAL_TV_DIR = Path("/var/lib/torrent-portal/manual-tv")
 MAX_MAGNET_LENGTH = 8192
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".m4v", ".mov", ".webm"}
 NOISE_PATTERN = re.compile(
@@ -491,7 +492,7 @@ def duplicate_check_action(config):
     checked = 0
     pending_metadata = 0
     for torrent in get_torrents(config):
-        if torrent.get("category") == "portal-tv":
+        if torrent.get("category") in {"portal-tv", "portal-tv-manual"}:
             continue
         tags = {tag.strip() for tag in str(torrent.get("tags", "")).split(",") if tag.strip()}
         if "portal-request" not in tags:
@@ -559,7 +560,7 @@ def duplicate_check_one_action(config, payload):
         fail("Invalid duplicate-check info hash", 400)
 
     torrent = find_torrent(config, info_hash)
-    if torrent and torrent.get("category") == "portal-tv":
+    if torrent and torrent.get("category") in {"portal-tv", "portal-tv-manual"}:
         emit({"ready": True, "duplicate": False, "infoHash": info_hash.upper()})
     if not torrent:
         emit({
@@ -669,6 +670,13 @@ def cleanup_old_torrents_action(config, dry_run):
     }
     candidates = []
     for torrent in get_torrents(config):
+        if torrent.get("category") == "portal-tv-manual":
+            try:
+                record = json.loads(manual_tv_path(str(torrent.get("hash", "")).lower()).read_text())
+                if record.get("state") != "imported" or record.get("refreshPending"):
+                    continue
+            except (OSError, ValueError):
+                continue
         state = str(torrent.get("state", "")).lower()
         progress = float(torrent.get("progress") or 0)
         completed_on = int(torrent.get("completion_on") or 0)
@@ -773,6 +781,7 @@ def status_action(config):
     emit({
         "connected": True,
         "qbittorrentVersion": version,
+        "manualImports": manual_tv_status(),
         "storage": [storage_status(config)],
         "queue": {
             "downloading": queue["downloading"],
@@ -909,9 +918,200 @@ def ensure_tv_series(config, tvdb_id):
     return sonarr_request(config, "series", "POST", series)
 
 
+def validate_manual_tv(value):
+    if not isinstance(value, dict):
+        raise ValueError("Enter the show title and season.")
+    title = value.get("title")
+    season = value.get("season")
+    episode = value.get("episode")
+    if (not isinstance(title, str) or not title.strip() or len(title.strip()) > 120
+            or len(title.strip().encode("utf-8")) > 160
+            or re.search(r'[\\/<>:"|?*\x00-\x1f]', title)
+            or title.strip() in {".", ".."} or title.strip().endswith(".")):
+        raise ValueError("Enter a show title without path separators or special filename characters.")
+    if type(season) is not int or not 0 <= season <= 999:
+        raise ValueError("Season must be a whole number between 0 and 999.")
+    if episode is not None and (type(episode) is not int or not 1 <= episode <= 9999):
+        raise ValueError("Episode must be 1 to 9999, or left blank for automatic sorting.")
+    return {"title": title.strip(), "season": season, "episode": episode}
+
+
+def manual_tv_path(info_hash):
+    if not re.fullmatch(r"[a-f0-9]{40}", info_hash):
+        raise ValueError("Invalid torrent hash")
+    return MANUAL_TV_DIR / (info_hash + ".json")
+
+
+def save_manual_tv(info_hash, record):
+    import tempfile
+    MANUAL_TV_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with tempfile.NamedTemporaryFile(mode="w", dir=MANUAL_TV_DIR, delete=False) as f:
+        json.dump(record, f)
+        temp_name = f.name
+    os.replace(temp_name, manual_tv_path(info_hash))
+
+
+def manual_tv_status():
+    results = []
+    for path in sorted(MANUAL_TV_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:10]:
+        try:
+            record = json.loads(path.read_text())
+            results.append({key: record.get(key) for key in ("title", "season", "episode", "state", "message")})
+        except (OSError, ValueError):
+            continue
+    return results
+
+
+def episode_suffix(filename, season):
+    # Prefer explicit season/episode markers; a bare number is accepted only at the start.
+    name = Path(filename).stem
+    match = re.search(r"(?i)(?<![A-Za-z0-9])S(\d{1,3})[ ._-]*E(\d{1,4})((?:[ ._-]*E\d{1,4})*)", name)
+    if match:
+        if int(match[1]) != season:
+            raise ValueError("The filename season differs from the season entered.")
+        episodes = [int(match[2])]
+        for marker in re.finditer(r"(?i)([ ._-]*)E(\d+)", match[3]):
+            number = int(marker[2])
+            if "-" in marker[1]:
+                if number <= episodes[-1] or number > 9999:
+                    raise ValueError("The episode range in the filename is invalid.")
+                episodes.extend(range(episodes[-1] + 1, number + 1))
+            else:
+                episodes.append(number)
+    else:
+        match = re.search(r"(?i)(?<![A-Za-z0-9])(\d{1,3})x(\d{1,4})\b", name)
+        if match:
+            if int(match[1]) != season:
+                raise ValueError("The filename season differs from the season entered.")
+            episodes = [int(match[2])]
+        else:
+            match = re.search(r"(?i)(?<![A-Za-z0-9])(?:episode[ ._-]*|ep[ ._-]*|e)(\d{1,4})\b", name)
+            if not match:
+                match = re.match(r"^(\d{1,3})(?=[ ._-]|$)", name)
+            if not match:
+                raise ValueError("Episode number could not be identified from the filename.")
+            episodes = [int(match[1])]
+    if any(not 1 <= e <= 9999 for e in episodes):
+        raise ValueError("The filename contains an invalid episode number.")
+    return "".join(f"E{e:02}" for e in episodes)
+
+
+def link_manual_tv(config, torrent, record, files):
+    """Import completed episode files without moving or overwriting torrent data."""
+    storage = Path(config["HOST_STORAGE_PATH"]).resolve()
+    source_root = (storage / "media/torrents/tv-manual").resolve()
+    shows_root = Path(config.get("HOST_SHOWS_PATH", str(storage / "media/shows"))).resolve()
+    if not source_root.is_relative_to(storage) or not shows_root.is_relative_to(storage):
+        raise ValueError("TV folders must be on the media volume.")
+    videos = [f for f in files if Path(f.get("name", "")).suffix.lower() in VIDEO_EXTENSIONS
+              and int(f.get("priority", 1)) != 0
+              and not re.search(r"(?i)(?:^|[ /_.-])(sample|trailer|preview)(?:[ /_.-]|$)", f.get("name", ""))]
+    if not videos:
+        raise ValueError("No episode video files were found.")
+    if record["episode"] is not None and len(videos) != 1:
+        raise ValueError("An episode number was supplied, but the torrent contains multiple videos. Re-add it with Episode left blank.")
+    remote_base = Path(str(torrent.get("save_path", "")))
+    if str(remote_base) != "/downloads/tv-manual":
+        raise ValueError("TV download folder changed; manual review is required.")
+    target_dir = shows_root / record["title"] / f"Season {record['season']:02}"
+    if not target_dir.resolve().is_relative_to(shows_root):
+        raise ValueError("The destination is outside Shows.")
+    owner = source_root.stat()
+    for directory in (shows_root / record["title"], target_dir):
+        if not directory.exists():
+            directory.mkdir(mode=0o775)
+            os.chown(directory, owner.st_uid, owner.st_gid)
+    imported = 0
+    errors = []
+    for video in videos:
+        try:
+            if float(video.get("progress", 0)) < 1:
+                raise ValueError("An episode file has not finished downloading.")
+            relative = Path(video["name"])
+            source = (source_root / relative).resolve()
+            if relative.is_absolute() or not source.is_relative_to(source_root) or not source.is_file():
+                raise ValueError("An episode file is missing or outside the TV download folder.")
+            suffix = f"E{record['episode']:02}" if record["episode"] is not None else episode_suffix(relative.name, record["season"])
+            basename = f"{record['title']} - S{record['season']:02}{suffix}"
+            destination = target_dir / (basename + source.suffix.lower())
+            if destination.exists():
+                if not os.path.samefile(source, destination):
+                    raise ValueError("The destination episode already exists; it was not overwritten.")
+            else:
+                os.link(source, destination)
+                imported += 1
+            # Preserve adjacent subtitles, including language suffixes.
+            for subtitle in source.parent.iterdir():
+                if subtitle.suffix.lower() not in {".srt", ".ass", ".ssa", ".vtt"} or not subtitle.name.startswith(source.stem + "."):
+                    continue
+                if not subtitle.resolve().is_relative_to(source_root) or not subtitle.is_file():
+                    continue
+                target = target_dir / (basename + subtitle.name[len(source.stem):])
+                if not target.exists():
+                    os.link(subtitle, target)
+        except (OSError, ValueError):
+            errors.append(Path(video.get("name", "episode")).name)
+    record["state"] = "needs-review" if errors else "imported"
+    record["message"] = (f"{len(errors)} file(s) need review: episode names, season, or an existing destination could not be matched. Original downloads were kept."
+                         if errors else "Episodes sorted into Shows.")
+    return imported
+
+
+def import_manual_tv_action(config):
+    import fcntl
+    MANUAL_TV_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with open(MANUAL_TV_DIR / ".lock", "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            emit({"busy": True})
+        if not is_exact_mount(config["HOST_STORAGE_PATH"]):
+            fail("Media volume is not mounted", 503)
+        torrents = {str(t["hash"]).lower(): t for t in get_torrents(config)}
+        imported = 0
+        refresh_needed = False
+        for path in MANUAL_TV_DIR.glob("*.json"):
+            record = None
+            info_hash = path.stem
+            try:
+                record = json.loads(path.read_text())
+                validate_manual_tv(record)
+                if record.get("state") == "imported":
+                    refresh_needed |= record.get("refreshPending", False)
+                    continue
+                torrent = torrents.get(info_hash)
+                if not torrent or torrent.get("category") != "portal-tv-manual" or float(torrent.get("progress", 0)) < 1:
+                    continue
+                files = json.loads(qb_request(config, "/api/v2/torrents/files?" + urllib.parse.urlencode({"hash": info_hash})))
+                count = link_manual_tv(config, torrent, record, files)
+                imported += count
+                record["refreshPending"] = record.get("refreshPending", False) or count > 0
+                refresh_needed |= record["refreshPending"]
+                save_manual_tv(info_hash, record)
+            except (OSError, ValueError) as error:
+                if isinstance(record, dict):
+                    message = str(error) if isinstance(error, ValueError) else "Could not access the TV files or destination. Original downloads were kept."
+                    record.update({"state": "needs-review", "message": message})
+                    save_manual_tv(info_hash, record)
+        if refresh_needed:
+            try:
+                url, key = load_jellyfin_config()
+                request = urllib.request.Request(url + "/Library/Refresh", method="POST", headers={"Authorization": "MediaBrowser Token=" + key})
+                with urllib.request.urlopen(request, timeout=20):
+                    pass
+                for path in MANUAL_TV_DIR.glob("*.json"):
+                    record = json.loads(path.read_text())
+                    if record.get("refreshPending"):
+                        record["refreshPending"] = False
+                        save_manual_tv(path.stem, record)
+            except (OSError, ValueError, SystemExit):
+                pass
+        emit({"importedFiles": imported})
+
+
 def add_action(config, payload):
     media_type = payload.get("mediaType", "movie")
-    if media_type not in {"movie", "show"}:
+    if media_type not in ("movie", "show"):
         fail("Choose Movie or TV Show.", 400)
     info_hash = validate_magnet(payload.get("magnet"))
     storage = storage_status(config)
@@ -931,15 +1131,31 @@ def add_action(config, payload):
             "message": "Storage is 95% full or higher. Please try again later.",
         })
 
-    if media_type == "show":
+    manual_tv = None
+    if media_type == "show" and "manualTV" in payload:
+        try:
+            manual_tv = validate_manual_tv(payload["manualTV"])
+        except ValueError as error:
+            fail(str(error), 400)
+    if media_type == "show" and manual_tv is None:
         ensure_tv_series(config, payload.get("tvdbId"))
     save_path = "/downloads/tv" if media_type == "show" else config["QB_SAVE_PATH"]
     category = "portal-tv" if media_type == "show" else ""
+    if manual_tv is not None:
+        save_path = "/downloads/tv-manual"
+        category = "portal-tv-manual"
     torrent = find_torrent(config, info_hash)
     if torrent and media_type == "show" and torrent.get("category") != category:
         fail("This torrent already exists outside TV downloads. Review it in qBittorrent first.", 409)
-    if torrent and media_type == "movie" and torrent.get("category") == "portal-tv":
+    if torrent and media_type == "movie" and torrent.get("category") in {"portal-tv", "portal-tv-manual"}:
         fail("This torrent is already a TV download.", 409)
+    if manual_tv is not None:
+        record_path = manual_tv_path(info_hash)
+        old = json.loads(record_path.read_text()) if record_path.exists() else None
+        if old and any(old.get(key) != value for key, value in manual_tv.items()) and old.get("state") == "imported":
+            fail("This torrent was already sorted with different TV details.", 409)
+        if old is None or any(old.get(key) != value for key, value in manual_tv.items()):
+            save_manual_tv(info_hash, {**manual_tv, "state": "waiting", "message": "Waiting for the download to finish."})
     if torrent:
         qb_request(config, "/api/v2/torrents/addTags", method="POST", form={
             "hashes": info_hash,
@@ -969,7 +1185,8 @@ def add_action(config, payload):
         "storageFull": False,
         "storageUsagePercent": round(usage_percent, 2),
         "infoHash": info_hash.upper(),
-        "message": ("TV torrent added. Episodes will be sorted into Shows after downloading."
+        "message": ("TV torrent added. Completed episodes will be sorted using your title, season, and episode details."
+                    if manual_tv is not None else "TV torrent added. Episodes will be sorted into Shows after downloading."
                     if media_type == "show" else message),
     })
 
@@ -981,6 +1198,8 @@ def main():
     config = load_config()
     if action == "status":
         status_action(config)
+    if action == "import-manual-tv":
+        import_manual_tv_action(config)
     if action == "library":
         library_action(config)
     if action == "duplicate-check":

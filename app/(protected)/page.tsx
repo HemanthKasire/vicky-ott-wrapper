@@ -11,7 +11,9 @@ type Storage = {
   id: string; label: string; totalBytes: number; usedBytes: number;
   availableBytes: number; mounted: boolean; healthy?: boolean;
 };
+type ManualImport = { title: string; season: number; episode?: number | null; state: string; message: string };
 type StatusPayload = {
+  manualImports?: ManualImport[];
   connected: boolean; storage: Storage[];
   queue?: { downloading: number; seeding: number; paused: number };
 };
@@ -63,8 +65,14 @@ export default function Home() {
   const [magnet, setMagnet] = useState("");
   const [mediaType, setMediaType] = useState<"movie" | "show">("movie");
   const [showQuery, setShowQuery] = useState("");
+  const [tvMode, setTvMode] = useState<"search" | "manual">("search");
+  const [manualTitle, setManualTitle] = useState("");
+  const [manualSeason, setManualSeason] = useState("1");
+  const [manualEpisode, setManualEpisode] = useState("");
+  const manualValid = Boolean(manualTitle.trim()) && /^\d{1,3}$/.test(manualSeason) && (manualEpisode === "" || (/^\d{1,4}$/.test(manualEpisode) && Number(manualEpisode) > 0));
   const [series, setSeries] = useState<Series[]>([]);
   const [selectedSeries, setSelectedSeries] = useState<Series | null>(null);
+  const tvReady = tvMode === "manual" ? manualValid : Boolean(selectedSeries);
   const [searching, setSearching] = useState(false);
   const [showError, setShowError] = useState("");
   const [status, setStatus] = useState<StatusPayload | null>(null);
@@ -144,8 +152,8 @@ export default function Home() {
       setNotice({ kind: "error", text: "Paste a magnet link beginning with magnet:?" });
       return;
     }
-    if (mediaType === "show" && !selectedSeries) {
-      setNotice({ kind: "error", text: "Search for and select the TV show first." });
+    if (mediaType === "show" && !tvReady) {
+      setNotice({ kind: "error", text: "Select a TV show or enter its title and season manually." });
       return;
     }
     if (addBusy) return;
@@ -157,7 +165,7 @@ export default function Home() {
         method: "POST",
         signal: controller.signal,
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ magnet: trimmed, mediaType, ...(mediaType === "show" ? { tvdbId: selectedSeries?.tvdbId } : {}) }),
+        body: JSON.stringify({ magnet: trimmed, mediaType, ...(mediaType === "show" ? tvMode === "manual" ? { manualTV: { title: manualTitle.trim(), season: Number(manualSeason), episode: manualEpisode === "" ? null : Number(manualEpisode) } } : { tvdbId: selectedSeries?.tvdbId } : {}) }),
       });
       const data = await readJson<AddPayload>(response);
       if (data.storageFull || !data.queued) {
@@ -196,7 +204,19 @@ export default function Home() {
                 </label>
               ))}</div>
             </fieldset>
-            {mediaType === "show" && <div className="mb-5">
+            {mediaType === "show" && <fieldset className="mb-5 flex flex-wrap gap-3" disabled={controlsBusy || searching}>
+              <legend className="mb-2 text-sm font-semibold">Show details</legend>
+              {([["search", "Search for a show"], ["manual", "Enter manually"]] as const).map(([value, label]) => <label key={value} className="flex cursor-pointer items-center gap-2 text-sm text-slate-300"><input type="radio" name="tvMode" checked={tvMode === value} onChange={() => { setTvMode(value); setNotice(null); }} className="accent-amber-400" />{label}</label>)}
+            </fieldset>}
+            {mediaType === "show" && tvMode === "manual" && <fieldset className="mb-5 space-y-3" disabled={controlsBusy}>
+              <div><label htmlFor="manual-title" className="mb-2 block text-sm font-semibold">TV show title</label><input id="manual-title" value={manualTitle} maxLength={120} onChange={(event) => setManualTitle(event.target.value)} placeholder="Example Show (2024)" className="w-full rounded-xl border border-white/10 bg-[#080d15] px-4 py-3 text-sm" /></div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div><label htmlFor="manual-season" className="mb-2 block text-sm font-semibold">Season number</label><input id="manual-season" type="number" min={0} max={999} step={1} value={manualSeason} onChange={(event) => setManualSeason(event.target.value)} className="w-full rounded-xl border border-white/10 bg-[#080d15] px-4 py-3 text-sm" /></div>
+                <div><label htmlFor="manual-episode" className="mb-2 block text-sm font-semibold">Episode number <span className="font-normal text-slate-500">(optional)</span></label><input id="manual-episode" type="number" min={1} max={9999} step={1} value={manualEpisode} onChange={(event) => setManualEpisode(event.target.value)} placeholder="Leave blank for multiple episodes" className="w-full rounded-xl border border-white/10 bg-[#080d15] px-4 py-3 text-sm" /></div>
+              </div>
+              <p className="text-xs leading-5 text-slate-500">Enter an episode number only for a single episode torrent. Leave it blank for a folder or season pack: episode numbers will be read from filenames such as S01E02, E02, or 02 - Title. Files that cannot be matched will be kept for review.</p>
+            </fieldset>}
+            {mediaType === "show" && tvMode === "search" && <div className="mb-5">
               <label htmlFor="show-search" className="mb-2 block text-sm font-semibold">Find your show</label>
               <div className="flex gap-2">
                 <input id="show-search" value={showQuery} disabled={searching || controlsBusy} onChange={(event) => { setShowQuery(event.target.value); setSelectedSeries(null); setSeries([]); }} onKeyDown={(event) => { if (event.key === "Enter" && showQuery.trim().length >= 2 && !searching) void searchShows(); }} placeholder="Enter the show title" maxLength={120} className="min-w-0 flex-1 rounded-xl border border-white/10 bg-[#080d15] px-4 py-3 text-sm" />
@@ -219,12 +239,14 @@ export default function Home() {
               </div>
               {skipConnectionCheck && <p className="mt-2 text-xs text-slate-500">The server still checks storage. If the add request times out, check qBittorrent before retrying.</p>}
             </div>
-            <div className="mt-4 flex flex-col-reverse items-stretch justify-between gap-3 sm:flex-row sm:items-center"><p className="flex items-center gap-2 text-xs text-slate-500"><ShieldCheck className="size-4 text-emerald-400" />Storage is rechecked before every request.</p><button type="button" onClick={addTorrent} disabled={!magnet.trim() || controlsBusy || searching || (mediaType === "show" && !selectedSeries)} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-amber-400 px-5 text-sm font-bold text-slate-950 transition hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-40">{addBusy ? <LoaderCircle className="size-4 animate-spin" /> : <Plus className="size-4" />}{addBusy ? "Adding torrent…" : "Add torrent"}</button></div>
+            <div className="mt-4 flex flex-col-reverse items-stretch justify-between gap-3 sm:flex-row sm:items-center"><p className="flex items-center gap-2 text-xs text-slate-500"><ShieldCheck className="size-4 text-emerald-400" />Storage is rechecked before every request.</p><button type="button" onClick={addTorrent} disabled={!magnet.trim() || controlsBusy || searching || (mediaType === "show" && !tvReady)} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-amber-400 px-5 text-sm font-bold text-slate-950 transition hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-40">{addBusy ? <LoaderCircle className="size-4 animate-spin" /> : <Plus className="size-4" />}{addBusy ? "Adding torrent…" : "Add torrent"}</button></div>
           </div>
           {notice && <div role="status" aria-live="polite" className={`mt-5 flex items-start gap-3 rounded-2xl border p-4 text-sm ${notice.kind === "success" ? "border-emerald-400/20 bg-emerald-400/[0.07] text-emerald-200" : "border-rose-400/20 bg-rose-400/[0.07] text-rose-200"}`}>{notice.kind === "success" ? <CheckCircle2 className="mt-0.5 size-4 shrink-0" /> : <XCircle className="mt-0.5 size-4 shrink-0" />}<p>{notice.text}</p></div>}
         </section>
 
         <aside className="space-y-5 lg:pt-[6.8rem]">
+          {Boolean(status?.manualImports?.length) && <div className="rounded-3xl border border-white/[0.09] bg-[#0d131e]/80 p-5"><h2 className="text-sm font-semibold">TV sorting</h2><div className="mt-4 space-y-3">{status?.manualImports?.map((item, index) => <div key={`${item.title}-${item.season}-${item.episode}-${index}`} className="rounded-xl bg-white/[0.035] p-3"><p className="text-sm text-slate-200">{item.title} · Season {item.season}{item.episode ? ` · Episode ${item.episode}` : ""}</p><p className={`mt-1 text-xs ${item.state === "needs-review" ? "text-amber-200" : "text-slate-400"}`}>{item.message}</p></div>)}</div></div>}
+
           <div className="rounded-3xl border border-white/[0.09] bg-[#0d131e]/80 p-5"><div className="flex items-center justify-between"><h2 className="flex items-center gap-2 text-sm font-semibold"><CircleGauge className="size-4 text-amber-300" /> Storage overview</h2><button type="button" onClick={() => { setSkipConnectionCheck(false); void loadStatus(); }} disabled={addBusy || statusBusy} className="grid size-8 place-items-center rounded-lg text-slate-500 hover:text-white" aria-label="Refresh storage"><RefreshCw className={`size-3.5 ${statusBusy ? "animate-spin" : ""}`} /></button></div>{statusError ? <div className="mt-4 rounded-2xl border border-rose-400/15 bg-rose-400/[0.05] p-4"><p className="text-sm font-semibold text-rose-200">Connection check unavailable</p><p className="mt-1 text-xs leading-5 text-slate-500">{statusError}</p></div> : storage.length ? <div className="mt-4 space-y-3">{storage.map((item) => <StorageCard key={item.id} storage={item} />)}</div> : skipConnectionCheck ? <p className="mt-4 text-xs leading-5 text-slate-500">Connection check skipped. Use Refresh storage to check again.</p> : <div className="mt-4 h-28 animate-pulse rounded-2xl bg-white/[0.035]" />}</div>
           <div className="rounded-3xl border border-white/[0.09] bg-[#0d131e]/80 p-5"><h2 className="flex items-center gap-2 text-sm font-semibold"><Server className="size-4 text-sky-300" /> Queue now</h2><div className="mt-4 grid grid-cols-3 gap-2">{[["Active", status?.queue?.downloading ?? "—"], ["Seeding", status?.queue?.seeding ?? "—"], ["Paused", status?.queue?.paused ?? "—"]].map(([label, value]) => <div key={label} className="rounded-xl bg-white/[0.035] px-2 py-3 text-center"><strong className="block text-lg text-white">{value}</strong><span className="text-[10px] uppercase tracking-wider text-slate-600">{label}</span></div>)}</div></div>
         </aside>

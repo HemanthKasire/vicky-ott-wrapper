@@ -83,3 +83,9 @@ used by the current portal.
 `series-search` accepts `{ "action": "series-search", "query": "show title" }`
 and returns `{ "items": [{ "tvdbId": 123, "title": "Example", "year": 2024 }] }`.
 Keep this action behind the same authenticated bridge as other requests.
+
+For manual TV requests, pass `manualTV: {"title":"Example Show","season":1,
+"episode":null}` instead of `tvdbId`. `episode` is optional and `null` requests
+filename-based episode sorting. The server validates all fields. The status
+response includes `manualImports` entries containing title, season, episode,
+state, and a user-facing message (`waiting`, `imported`, or `needs-review`).

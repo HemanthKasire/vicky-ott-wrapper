@@ -101,3 +101,24 @@ with `{ "query": "show title" }`. Existing movie requests still use the movie
 organiser. No indexers are configured; only submitted magnets are downloaded.
 
 Backend checks: `python3 server/tv/test_tv_requests.py`.
+
+### Enter TV details manually
+
+Choose **TV Show → Enter manually**, then enter the show title and season.
+**Episode is optional:** enter it only when the torrent has one episode video.
+Leave it blank for episode folders or season packs; the sorter reads episode
+numbers from filenames (`S01E02`, `1x02`, `E02`, `Episode 02`, or `02 - Title`).
+The supplied season must agree with explicit season markers in filenames.
+Unrecognised files and existing destinations are left intact and reported in
+**TV sorting** after refreshing storage. No show search is needed in this mode.
+
+Manual downloads use category `portal-tv-manual` and `/downloads/tv-manual`.
+A background service checks completed downloads every minute, creates hardlinks
+under `Shows/<Title>/Season <NN>/`, preserves adjacent subtitles, and refreshes
+Jellyfin. It refuses an episode override for multi-video torrents. Unimported
+manual downloads are excluded from automatic torrent retention cleanup.
+
+Use `server/tv/install-manual-tv.sh` on the OCI host after deploying the updated
+helper. n8n must forward `manualTV: {title, season, episode}` instead of `tvdbId`
+for manual requests; `episode` can be `null`. Run both backend test files under
+`server/tv/` to verify request routing and manual sorting.

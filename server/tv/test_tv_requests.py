@@ -1,6 +1,8 @@
 import importlib.util
 from pathlib import Path
 import unittest
+import tempfile
+import json
 from unittest.mock import patch
 spec=importlib.util.spec_from_file_location('portal',Path(__file__).parents[1]/'torrent-portal.py')
 portal=importlib.util.module_from_spec(spec);spec.loader.exec_module(portal)
@@ -31,4 +33,15 @@ class TVRequests(unittest.TestCase):
  def test_existing_tv_is_not_reclassified_as_movie(self):
   result,_,calls=self.run_add({'magnet':'unused'},{'category':'portal-tv'})
   self.assertEqual(result['status'],409);self.assertFalse(calls)
+ def test_manual_pack_skips_series_lookup(self):
+  with tempfile.TemporaryDirectory() as tmp, patch.object(portal,'MANUAL_TV_DIR',Path(tmp)):
+   result,series,calls=self.run_add({'magnet':'unused','mediaType':'show','manualTV':{'title':'Example Show','season':1,'episode':None}})
+   self.assertTrue(result['queued']);self.assertFalse(series)
+   self.assertEqual(calls[0].kwargs['form']['savepath'],'/downloads/tv-manual')
+   self.assertEqual(calls[0].kwargs['form']['category'],'portal-tv-manual')
+   record=json.loads((Path(tmp)/(('a'*40)+'.json')).read_text())
+   self.assertEqual(record['title'],'Example Show');self.assertIsNone(record['episode'])
+ def test_invalid_manual_season_does_not_add(self):
+  result,series,calls=self.run_add({'magnet':'unused','mediaType':'show','manualTV':{'title':'Show','season':-1}})
+  self.assertEqual(result['status'],400);self.assertFalse(series);self.assertFalse(calls)
 if __name__=='__main__':unittest.main()
