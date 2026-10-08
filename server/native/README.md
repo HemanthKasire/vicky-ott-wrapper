@@ -5,6 +5,13 @@ a persistent SQLite queue, and a systemd health-check timer. The existing torren
 helper, Sonarr, movie organizer, manual-TV importer, retention timer and media
 storage remain in place.
 
+`server/tv/install-library-refresh.sh` installs a lightweight TV-import watcher.
+It detects episode file changes once per minute and requests a full Jellyfin scan,
+covering both Sonarr and manual imports when an import notification does not
+update the remote NFS library. Pending scans are persisted and only marked done
+after Jellyfin reports successful completion. Scan failures are retried without
+resubmitting scans while another is running.
+
 | n8n workflow | Replacement |
 | --- | --- |
 | Vicky OTT Torrent Bridge | Authenticated API, local torrent helper, durable duplicate-check jobs |

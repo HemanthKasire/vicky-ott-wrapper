@@ -5,7 +5,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import {
   Clapperboard, Film, LoaderCircle, RefreshCw, Search, Star, Tv, XCircle,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type LibraryItem = {
   id: string; title: string; type: "movie" | "show";
@@ -33,37 +33,55 @@ export default function LibraryPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  const loadCatalog = useCallback(async () => {
-    setLoading(true); setError("");
+  const catalogRequest = useRef<AbortController | null>(null);
+  const hasCatalog = useRef(false);
+
+  const loadCatalog = useCallback(async (background = false) => {
+    if (background && catalogRequest.current) return;
+    catalogRequest.current?.abort();
+    const controller = new AbortController();
+    catalogRequest.current = controller;
+    if (!background) { setLoading(true); setError(""); }
+    const timeout = window.setTimeout(() => controller.abort(), 40_000);
     try {
-      const response = await fetch("/api/library", { cache: "no-store" });
-      setCatalog(await readJson(response));
+      const response = await fetch("/api/library", { cache: "no-store", signal: controller.signal });
+      const data = await readJson(response);
+      if (catalogRequest.current !== controller) return;
+      hasCatalog.current = true;
+      setCatalog(data);
+      setError("");
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not load the Jellyfin catalog");
+      if (catalogRequest.current !== controller) return;
+      if (!background || !hasCatalog.current) {
+        setError(reason instanceof Error && reason.name === "AbortError"
+          ? "The library request timed out. Try refreshing the catalog."
+          : reason instanceof Error ? reason.message : "Could not load the Jellyfin catalog");
+      }
     } finally {
-      setLoading(false);
+      window.clearTimeout(timeout);
+      if (catalogRequest.current === controller) {
+        catalogRequest.current = null;
+        setLoading(false);
+      }
     }
   }, []);
 
   useEffect(() => {
-    let active = true;
-
-    fetch("/api/library", { cache: "no-store" })
-      .then(readJson)
-      .then((data) => {
-        if (active) setCatalog(data);
-      })
-      .catch((reason: unknown) => {
-        if (active) {
-          setError(reason instanceof Error ? reason.message : "Could not load the Jellyfin catalog");
-        }
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
-
-    return () => { active = false; };
-  }, []);
+    const initial = window.setTimeout(() => void loadCatalog(), 0);
+    const refreshVisible = () => {
+      if (document.visibilityState === "visible") void loadCatalog(true);
+    };
+    const interval = window.setInterval(refreshVisible, 60_000);
+    document.addEventListener("visibilitychange", refreshVisible);
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", refreshVisible);
+      const request = catalogRequest.current;
+      catalogRequest.current = null;
+      request?.abort();
+    };
+  }, [loadCatalog]);
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
